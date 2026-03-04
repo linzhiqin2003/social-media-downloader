@@ -188,35 +188,16 @@ class WeiboDownloader:
             return False
 
     def import_cookies(self, raw: str) -> bool:
-        """Import cookies from raw string (JSON array or 'name1=val1; name2=val2').
+        """Import cookies from raw string.
 
+        Supports: JSON array, raw cookie string, Netscape cookie file.
         Returns True if essential cookies are present.
         """
         raw = raw.strip()
         if not raw:
             return False
 
-        cookies = None
-
-        # Try JSON first
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                cookies = parsed
-            elif isinstance(parsed, dict) and "cookies" in parsed:
-                cookies = parsed["cookies"]
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Try raw cookie string
-        if cookies is None and "=" in raw:
-            cookies = []
-            for pair in raw.replace("\n", ";").split(";"):
-                pair = pair.strip()
-                if "=" in pair:
-                    name, value = pair.split("=", 1)
-                    cookies.append({"name": name.strip(), "value": value.strip()})
-
+        cookies = _parse_cookies(raw)
         if not cookies:
             return False
 
@@ -465,3 +446,69 @@ class WeiboDownloader:
                     path.write_bytes(response.content)
             except Exception:
                 continue
+
+
+def _parse_cookies(raw: str) -> list:
+    """Parse cookies from multiple formats.
+
+    Supports:
+    - JSON array: [{"name": "x", "value": "y"}, ...]
+    - Playwright storage_state: {"cookies": [...]}
+    - Raw cookie string: "name1=val1; name2=val2"
+    - Netscape HTTP Cookie File (tab-separated, exported by browser plugins)
+    """
+    raw = raw.strip()
+    if not raw:
+        return []
+
+    # Try JSON first
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and "cookies" in parsed:
+            return parsed["cookies"]
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Try Netscape HTTP Cookie File format
+    # Lines: domain \t flag \t path \t secure \t expiry \t name \t value
+    lines = raw.splitlines()
+    if any(line.startswith("# Netscape HTTP Cookie File") or
+           line.startswith("# HTTP Cookie File") for line in lines[:5]):
+        cookies = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                cookies.append({"name": parts[5], "value": parts[6]})
+        if cookies:
+            return cookies
+
+    # Also try tab-separated lines even without the header comment
+    if "\t" in raw:
+        cookies = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                cookies.append({"name": parts[5], "value": parts[6]})
+        if cookies:
+            return cookies
+
+    # Try raw cookie string: "name1=val1; name2=val2"
+    if "=" in raw:
+        cookies = []
+        for pair in raw.replace("\n", ";").split(";"):
+            pair = pair.strip()
+            if "=" in pair:
+                name, value = pair.split("=", 1)
+                cookies.append({"name": name.strip(), "value": value.strip()})
+        if cookies:
+            return cookies
+
+    return []
