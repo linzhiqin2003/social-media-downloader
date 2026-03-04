@@ -25,12 +25,8 @@ jobs:
         run: |
           poetry run pyinstaller \
             --onedir --windowed --name smd \
-            --runtime-hook pyinstaller_hooks/runtime_hook_pyqt5.py \
             --collect-all httpx --collect-all typer --collect-all rich \
-            --collect-all pydantic --collect-all PyQt5 \
-            --collect-binaries PyQt5 \
-            --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui \
-            --hidden-import PyQt5.QtWidgets --hidden-import PyQt5.sip \
+            --collect-all pydantic --collect-all PySide6 \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader --hidden-import src.weibo.downloader \
             --hidden-import src.gui --hidden-import src.app --hidden-import src.ui \
@@ -61,9 +57,7 @@ jobs:
             --onedir --windowed --name "Social Media Downloader" \
             --icon assets/icon.icns \
             --collect-all httpx --collect-all typer --collect-all rich \
-            --collect-all pydantic --collect-all PyQt5 \
-            --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui \
-            --hidden-import PyQt5.QtWidgets --hidden-import PyQt5.sip \
+            --collect-all pydantic --collect-all PySide6 \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader --hidden-import src.weibo.downloader \
             --hidden-import src.gui --hidden-import src.app --hidden-import src.ui \
@@ -93,9 +87,7 @@ jobs:
           poetry run pyinstaller \
             --onedir --name smd \
             --collect-all httpx --collect-all typer --collect-all rich \
-            --collect-all pydantic --collect-all PyQt5 \
-            --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui \
-            --hidden-import PyQt5.QtWidgets --hidden-import PyQt5.sip \
+            --collect-all pydantic --collect-all PySide6 \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader --hidden-import src.weibo.downloader \
             --hidden-import src.gui --hidden-import src.app --hidden-import src.ui \

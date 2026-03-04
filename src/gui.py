@@ -1,15 +1,14 @@
-"""PyQt5 GUI for Social Media Downloader."""
+"""PySide6 GUI for Social Media Downloader."""
 
 import asyncio
-import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QFont, QIcon, QColor
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QFont, QIcon
+from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
@@ -36,37 +35,16 @@ except ImportError:
     from src.weibo import WeiboDownloader
 
 
-# ---- Logging handler that emits to Qt signal ----
-
-class QtLogHandler(logging.Handler):
-    """Logging handler that forwards to a callback."""
-
-    def __init__(self, callback):
-        super().__init__()
-        self.callback = callback
-
-    def emit(self, record):
-        msg = self.format(record)
-        self.callback(msg)
-
-
 # ---- Worker thread for async downloads ----
 
 class DownloadWorker(QThread):
     """Runs async download in a separate thread."""
 
-    log = pyqtSignal(str)
-    progress = pyqtSignal(int, int)  # current, total
-    finished_ok = pyqtSignal(bool, str)  # success, message
+    log = Signal(str)
+    progress = Signal(int, int)
+    finished_ok = Signal(bool, str)
 
-    def __init__(
-        self,
-        url: str,
-        output_dir: Path,
-        fetch_comments: bool,
-        max_comments: int,
-        download_images: bool,
-    ):
+    def __init__(self, url, output_dir, fetch_comments, max_comments, download_images):
         super().__init__()
         self.url = url
         self.output_dir = output_dir
@@ -74,7 +52,7 @@ class DownloadWorker(QThread):
         self.max_comments = max_comments
         self.download_images = download_images
 
-    def _detect_platform(self, url: str) -> Optional[str]:
+    def _detect_platform(self, url):
         url_lower = url.lower()
         if "xiaohongshu.com" in url_lower or "xhslink.com" in url_lower:
             return "xiaohongshu"
@@ -140,7 +118,7 @@ class DownloadWorker(QThread):
 class LoginCheckWorker(QThread):
     """Check login status in background."""
 
-    result = pyqtSignal(bool, bool)  # xhs_logged_in, weibo_logged_in
+    result = Signal(bool, bool)
 
     def run(self):
         try:
@@ -169,7 +147,7 @@ class LoginCheckWorker(QThread):
 class CookieDialog(QDialog):
     """Dialog for pasting cookies."""
 
-    def __init__(self, platform_name: str, parent=None):
+    def __init__(self, platform_name, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"导入 {platform_name} Cookie")
         self.setMinimumSize(500, 350)
@@ -177,7 +155,6 @@ class CookieDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # Instructions
         instructions = QLabel(
             f"<b>{platform_name} Cookie 导入</b><br><br>"
             "1. 在浏览器中打开对应网站并登录<br>"
@@ -188,7 +165,6 @@ class CookieDialog(QDialog):
         instructions.setTextFormat(Qt.RichText)
         layout.addWidget(instructions)
 
-        # Copyable JS code
         js_code = (
             "copy(document.cookie.split('; ')"
             ".map(c => { const [n,...v] = c.split('='); "
@@ -208,12 +184,10 @@ class CookieDialog(QDialog):
         step4 = QLabel("4. 将剪贴板内容粘贴到下方：")
         layout.addWidget(step4)
 
-        # Text area
         self.text_edit = QTextEdit()
         self.text_edit.setPlaceholderText("在此粘贴 Cookie JSON 或原始字符串...")
         layout.addWidget(self.text_edit)
 
-        # Buttons
         btn_layout = QHBoxLayout()
         btn_ok = QPushButton("确定")
         btn_ok.clicked.connect(self._accept)
@@ -258,7 +232,6 @@ class MainWindow(QMainWindow):
         login_group = QGroupBox("登录状态")
         login_layout = QVBoxLayout(login_group)
 
-        # XHS row
         xhs_row = QHBoxLayout()
         self.xhs_status_label = QLabel("小红书: 检查中...")
         xhs_row.addWidget(self.xhs_status_label, 1)
@@ -268,7 +241,6 @@ class MainWindow(QMainWindow):
         xhs_row.addWidget(self.xhs_cookie_btn)
         login_layout.addLayout(xhs_row)
 
-        # Weibo row
         weibo_row = QHBoxLayout()
         self.weibo_status_label = QLabel("微博: 检查中...")
         weibo_row.addWidget(self.weibo_status_label, 1)
@@ -284,7 +256,6 @@ class MainWindow(QMainWindow):
         settings_group = QGroupBox("下载设置")
         settings_layout = QVBoxLayout(settings_group)
 
-        # URL input row
         url_row = QHBoxLayout()
         url_row.addWidget(QLabel("URL:"))
         self.url_input = QLineEdit()
@@ -297,7 +268,6 @@ class MainWindow(QMainWindow):
         url_row.addWidget(self.download_btn)
         settings_layout.addLayout(url_row)
 
-        # Output dir row
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("输出目录:"))
         self.output_input = QLineEdit(str(Path("./downloads").resolve()))
@@ -308,7 +278,6 @@ class MainWindow(QMainWindow):
         dir_row.addWidget(browse_btn)
         settings_layout.addLayout(dir_row)
 
-        # Options row
         opts_row = QHBoxLayout()
         self.chk_images = QCheckBox("下载图片")
         self.chk_images.setChecked(True)
@@ -351,7 +320,7 @@ class MainWindow(QMainWindow):
         self.login_worker.result.connect(self._on_login_checked)
         self.login_worker.start()
 
-    def _on_login_checked(self, xhs_ok: bool, weibo_ok: bool):
+    def _on_login_checked(self, xhs_ok, weibo_ok):
         self.xhs_logged_in = xhs_ok
         self.weibo_logged_in = weibo_ok
         self._update_login_labels()
@@ -373,10 +342,10 @@ class MainWindow(QMainWindow):
 
     # ---- Cookie import ----
 
-    def _import_cookie(self, platform: str):
+    def _import_cookie(self, platform):
         name = "小红书" if platform == "xiaohongshu" else "微博"
         dlg = CookieDialog(name, self)
-        if dlg.exec_() != QDialog.Accepted:
+        if dlg.exec() != QDialog.Accepted:
             return
 
         raw = dlg.cookie_text
@@ -390,7 +359,6 @@ class MainWindow(QMainWindow):
             self.weibo_logged_in = ok
 
         self._update_login_labels()
-
         if ok:
             self._log(f"{name} Cookie 导入成功")
         else:
@@ -431,12 +399,12 @@ class MainWindow(QMainWindow):
         self.worker.finished_ok.connect(self._on_download_done)
         self.worker.start()
 
-    def _on_progress(self, current: int, total: int):
+    def _on_progress(self, current, total):
         if total > 0:
             self.progress_bar.setMaximum(total)
             self.progress_bar.setValue(current)
 
-    def _on_download_done(self, success: bool, message: str):
+    def _on_download_done(self, success, message):
         self.download_btn.setEnabled(True)
         if success:
             self._log(f"[OK] {message}")
@@ -445,7 +413,7 @@ class MainWindow(QMainWindow):
 
     # ---- Logging ----
 
-    def _log(self, text: str):
+    def _log(self, text):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{ts}] {text}")
 
@@ -456,7 +424,6 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Social Media Downloader")
 
-    # Load icon if available
     icon_paths = [
         Path(__file__).parent.parent / "assets" / "icon.png",
         Path(__file__).parent.parent / "assets" / "icon.icns",
@@ -468,7 +435,7 @@ def main():
 
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
