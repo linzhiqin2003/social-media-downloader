@@ -47,15 +47,17 @@ jobs:
           poetry run pyinstaller \
             --onefile \
             --name smd \
-            --console \
+            --windowed \
             --collect-all httpx \
             --collect-all typer \
             --collect-all rich \
             --collect-all pydantic \
+            --collect-all PyQt5 \
             --hidden-import src.xiaohongshu \
             --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader \
             --hidden-import src.weibo.downloader \
+            --hidden-import src.gui \
             --hidden-import src.app \
             --hidden-import src.ui \
             --add-data "src:src" \

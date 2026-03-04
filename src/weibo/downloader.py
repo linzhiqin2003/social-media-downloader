@@ -187,6 +187,45 @@ class WeiboDownloader:
             console.print("[red]无法解析 Cookie，请重试[/red]")
             return False
 
+    def import_cookies(self, raw: str) -> bool:
+        """Import cookies from raw string (JSON array or 'name1=val1; name2=val2').
+
+        Returns True if essential cookies are present.
+        """
+        raw = raw.strip()
+        if not raw:
+            return False
+
+        cookies = None
+
+        # Try JSON first
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                cookies = parsed
+            elif isinstance(parsed, dict) and "cookies" in parsed:
+                cookies = parsed["cookies"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Try raw cookie string
+        if cookies is None and "=" in raw:
+            cookies = []
+            for pair in raw.replace("\n", ";").split(";"):
+                pair = pair.strip()
+                if "=" in pair:
+                    name, value = pair.split("=", 1)
+                    cookies.append({"name": name.strip(), "value": value.strip()})
+
+        if not cookies:
+            return False
+
+        with open(self.cookie_path, "w") as f:
+            json.dump(cookies, f, ensure_ascii=False)
+
+        names = {c.get("name", "") for c in cookies}
+        return "SUB" in names or "SUBP" in names
+
     # ---- URL parsing ----
 
     @staticmethod

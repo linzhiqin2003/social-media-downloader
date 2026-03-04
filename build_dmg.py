@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 """Build macOS .app bundle and DMG installer.
 
-Since this is a terminal-based interactive app (uses input() and Rich),
-we build a CLI binary and wrap it in a .app that auto-opens Terminal.
+Builds a PyQt5 GUI app — no Terminal needed, double-click to open.
 """
 
 import os
@@ -42,15 +41,17 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", "smd",
-        "--console",
+        "--windowed",
         "--collect-all", "httpx",
         "--collect-all", "typer",
         "--collect-all", "rich",
         "--collect-all", "pydantic",
+        "--collect-all", "PyQt5",
         "--hidden-import", "src.xiaohongshu",
         "--hidden-import", "src.weibo",
         "--hidden-import", "src.xiaohongshu.downloader",
         "--hidden-import", "src.weibo.downloader",
+        "--hidden-import", "src.gui",
         "--hidden-import", "src.app",
         "--hidden-import", "src.ui",
         "--add-data", "src:src",
@@ -79,22 +80,12 @@ def main():
     # Copy binary into Resources
     shutil.copy2(smd_binary, resources_dir / "smd")
 
-    # Create launcher script that opens Terminal
+    # Create launcher script — GUI app, no Terminal needed
     launcher = macos_dir / "launcher"
     launcher.write_text(f"""#!/bin/bash
 # Launcher for {APP_NAME}
-# Opens Terminal.app and runs the interactive CLI
-
 RESOURCES_DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
-SMD_BIN="$RESOURCES_DIR/smd"
-
-# Use AppleScript to open a new Terminal window and run smd
-osascript <<APPLESCRIPT
-tell application "Terminal"
-    activate
-    do script "clear && \\"$SMD_BIN\\"; exit"
-end tell
-APPLESCRIPT
+exec "$RESOURCES_DIR/smd"
 """)
     launcher.chmod(0o755)
 

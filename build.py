@@ -51,17 +51,19 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", "smd",
-        "--console",
+        "--windowed",
         # Collect all required packages
         "--collect-all", "httpx",
         "--collect-all", "typer",
         "--collect-all", "rich",
         "--collect-all", "pydantic",
+        "--collect-all", "PyQt5",
         # Hidden imports
         "--hidden-import", "src.xiaohongshu",
         "--hidden-import", "src.weibo",
         "--hidden-import", "src.xiaohongshu.downloader",
         "--hidden-import", "src.weibo.downloader",
+        "--hidden-import", "src.gui",
         "--hidden-import", "src.app",
         "--hidden-import", "src.ui",
     ]
