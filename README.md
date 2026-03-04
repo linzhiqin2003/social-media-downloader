@@ -40,13 +40,11 @@
 
 从 [Releases](../../releases) 页面下载对应平台的安装包：
 
-| 平台 | 文件 |
-|------|------|
-| macOS (Apple Silicon) | `SocialMediaDownloader-macOS.dmg` |
-| Windows | `smd-windows-x64.exe` |
-| Linux | `smd-linux-x64` |
-
-macOS 用户下载 DMG 后，将 app 拖入 Applications 或桌面，双击即可使用。
+| 平台 | 文件 | 说明 |
+|------|------|------|
+| Windows | `smd-windows-x64.zip` | 解压后运行 `smd/smd.exe` |
+| macOS (Apple Silicon) | `SocialMediaDownloader-macOS-arm64.zip` | 解压得到 `.app`，双击使用 |
+| Linux | `smd-linux-x64.tar.gz` | 解压后运行 `smd/smd` |
 
 ### 方式二：从源码运行
 

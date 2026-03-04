@@ -24,18 +24,21 @@ jobs:
         shell: bash
         run: |
           poetry run pyinstaller \
-            --onefile --windowed --name smd \
+            --onedir --windowed --name smd \
             --collect-all httpx --collect-all typer --collect-all rich \
             --collect-all pydantic --collect-all PyQt5 \
+            --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui \
+            --hidden-import PyQt5.QtWidgets --hidden-import PyQt5.sip \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader --hidden-import src.weibo.downloader \
             --hidden-import src.gui --hidden-import src.app --hidden-import src.ui \
             --add-data "src;src" --icon assets/icon.ico \
             entry.py
+          cd dist && 7z a -tzip smd-windows-x64.zip smd/
       - uses: actions/upload-artifact@v4
         with:
           name: smd-windows-x64
-          path: dist/smd.exe
+          path: dist/smd-windows-x64.zip
 
   build-macos:
     runs-on: macos-latest
@@ -57,6 +60,8 @@ jobs:
             --icon assets/icon.icns \
             --collect-all httpx --collect-all typer --collect-all rich \
             --collect-all pydantic --collect-all PyQt5 \
+            --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui \
+            --hidden-import PyQt5.QtWidgets --hidden-import PyQt5.sip \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader --hidden-import src.weibo.downloader \
             --hidden-import src.gui --hidden-import src.app --hidden-import src.ui \
@@ -84,18 +89,21 @@ jobs:
       - name: Build
         run: |
           poetry run pyinstaller \
-            --onefile --name smd \
+            --onedir --name smd \
             --collect-all httpx --collect-all typer --collect-all rich \
             --collect-all pydantic --collect-all PyQt5 \
+            --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui \
+            --hidden-import PyQt5.QtWidgets --hidden-import PyQt5.sip \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
             --hidden-import src.xiaohongshu.downloader --hidden-import src.weibo.downloader \
             --hidden-import src.gui --hidden-import src.app --hidden-import src.ui \
             --add-data "src:src" \
             entry.py
+          cd dist && tar czf smd-linux-x64.tar.gz smd/
       - uses: actions/upload-artifact@v4
         with:
           name: smd-linux-x64
-          path: dist/smd
+          path: dist/smd-linux-x64.tar.gz
 
   release:
     needs: [build-windows, build-macos, build-linux]
@@ -111,8 +119,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/smd-windows-x64/smd.exe
+            artifacts/smd-windows-x64/smd-windows-x64.zip
             artifacts/smd-macos-arm64/SocialMediaDownloader-macOS-arm64.zip
-            artifacts/smd-linux-x64/smd
+            artifacts/smd-linux-x64/smd-linux-x64.tar.gz
           draft: false
           prerelease: false
