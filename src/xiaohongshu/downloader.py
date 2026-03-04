@@ -1,12 +1,17 @@
-"""Xiaohongshu content downloader."""
+"""Xiaohongshu API-based content downloader.
+
+Uses Playwright as a signing oracle:
+- Note detail: extracted from SSR __INITIAL_STATE__ (no API signing needed)
+- Comments: fetched via /api/sns/web/v2/comment/page through browser's network stack
+- Images: direct CDN download (no auth needed)
+"""
 
 import asyncio
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
-from urllib.parse import parse_qs, urlparse
+from typing import List, Optional, Tuple
 
 import httpx
 from playwright.async_api import async_playwright, Page, Browser
@@ -33,6 +38,7 @@ class Comment(BaseModel):
     likes: int = 0
     create_time: Optional[datetime] = None
     sub_comments: List["Comment"] = Field(default_factory=list)
+    ip_location: str = ""
 
 
 class Note(BaseModel):
@@ -50,33 +56,14 @@ class Note(BaseModel):
     collects: int = 0
     shares: int = 0
     comments: List[Comment] = Field(default_factory=list)
-
-
-# ============ Selectors ============
-
-class Selectors:
-    """CSS selectors for Xiaohongshu."""
-    NOTE_TITLE = '#detail-title, .note-content .title'
-    NOTE_CONTENT = '#detail-desc .note-text, .note-text, .desc'
-    NOTE_IMAGES = '[class*="swiper"] img, [class*="carousel"] img, [class*="slide"] img'
-    NOTE_VIDEO = 'video source, video'
-    NOTE_TAGS = 'a.tag, a[id="hash-tag"], a[href*="/search_result?keyword"]'
-    NOTE_TIME = '[class*="time"], [class*="date"]'
-    NOTE_ERROR = 'text=当前笔记暂时无法浏览'
-    AUTHOR_CONTAINER = '.author-container, .author-wrapper'
-    AUTHOR_LINK = 'a[href*="/user/profile/"]'
-    COMMENTS_CONTAINER = '#noteContainer .comments-container, .comments-container, .comment-list'
-    COMMENT_ITEM = '.comment-inner, .comment-item, [class*="commentItem"]'
-    COMMENT_CONTENT = '.content, .comment-content'
-    COMMENT_AUTHOR_NAME = '.name, .author-name, .nickname'
-    COMMENT_LIKES = '.like-count, .likes, [class*="like"] .count'
-    COMMENT_TIME = '.time, .date, [class*="time"]'
+    ip_location: str = ""
+    note_type: str = "normal"
 
 
 # ============ Downloader ============
 
 class XiaohongshuDownloader:
-    """Download content from Xiaohongshu."""
+    """API-based downloader for Xiaohongshu."""
 
     BASE_URL = "https://www.xiaohongshu.com"
     EXPLORE_URL = f"{BASE_URL}/explore"
@@ -87,6 +74,7 @@ class XiaohongshuDownloader:
         self.cookie_path = self.DATA_DIR / "cookies.json"
         self.browser: Optional[Browser] = None
         self.playwright = None
+        self._session_warm = False  # Track if session is warmed up
 
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
@@ -106,10 +94,30 @@ class XiaohongshuDownloader:
             await self.playwright.stop()
 
     def _get_storage_state(self) -> Optional[dict]:
-        """Load storage state from file."""
-        if self.cookie_path.exists():
-            return str(self.cookie_path)
-        return None
+        """Load storage state (Playwright format) from file.
+
+        Handles two cookie formats:
+        - Playwright storage_state: {"cookies": [...], "origins": [...]}
+        - Plain cookie list: [{name, value, domain, ...}, ...]
+        """
+        if not self.cookie_path.exists():
+            return None
+
+        try:
+            with open(self.cookie_path, "r") as f:
+                data = json.load(f)
+
+            # Already in storage_state format
+            if isinstance(data, dict) and "cookies" in data:
+                return data
+
+            # Plain cookie list — wrap into storage_state format
+            if isinstance(data, list):
+                return {"cookies": data, "origins": []}
+
+            return None
+        except Exception:
+            return None
 
     async def login(self) -> bool:
         """Interactive login via QR code."""
@@ -135,47 +143,52 @@ class XiaohongshuDownloader:
         return True
 
     async def check_login(self) -> bool:
-        """Check if logged in."""
-        if not self.cookie_path.exists():
+        """Check if logged in (lightweight: just check cookie file)."""
+        state = self._get_storage_state()
+        if not state:
             return False
 
-        context = await self.browser.new_context(storage_state=str(self.cookie_path))
-        page = await context.new_page()
-
         try:
-            await page.goto(self.BASE_URL, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
-
-            # Check for login button
-            login_btn = await page.query_selector('button:has-text("登录")')
-            is_logged_in = login_btn is None
-
-            await context.close()
-            return is_logged_in
+            cookies = state.get("cookies", [])
+            cookie_names = {c.get("name", "") for c in cookies}
+            return "web_session" in cookie_names or "a1" in cookie_names
         except Exception:
-            await context.close()
             return False
 
     @staticmethod
-    def parse_url(url: str) -> tuple[str, str]:
-        """Parse note ID and xsec_token from URL."""
-        if not url.startswith("http"):
-            return url.strip(), ""
+    def parse_url(url: str) -> Tuple[str, str]:
+        """Parse note_id and xsec_token from a XHS URL.
 
-        parsed = urlparse(url)
-        path_parts = parsed.path.strip("/").split("/")
-
+        Supports formats:
+        - https://www.xiaohongshu.com/explore/{note_id}?xsec_token=...
+        - https://www.xiaohongshu.com/discovery/item/{note_id}?...
+        - https://xhslink.com/xxx (short link)
+        - Just a note_id string
+        """
         note_id = ""
-        for i, part in enumerate(path_parts):
-            if part in ("explore", "discovery", "item", "search_result") and i + 1 < len(path_parts):
-                note_id = path_parts[i + 1]
+        xsec_token = ""
+
+        # Extract note_id
+        patterns = [
+            r'/explore/([a-zA-Z0-9]+)',
+            r'/discovery/item/([a-zA-Z0-9]+)',
+            r'/note/([a-zA-Z0-9]+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                note_id = match.group(1)
                 break
 
-        if not note_id and path_parts:
-            note_id = path_parts[-1]
+        if not note_id:
+            clean = url.strip().split('?')[0].split('/')[-1]
+            if re.match(r'^[a-zA-Z0-9]+$', clean):
+                note_id = clean
 
-        params = parse_qs(parsed.query)
-        xsec_token = params.get("xsec_token", [""])[0]
+        # Extract xsec_token
+        token_match = re.search(r'xsec_token=([^&]+)', url)
+        if token_match:
+            xsec_token = token_match.group(1)
 
         return note_id, xsec_token
 
@@ -187,7 +200,7 @@ class XiaohongshuDownloader:
         max_comments: int = 50,
         download_images: bool = True,
     ) -> Optional[Note]:
-        """Download a note by URL.
+        """Download a note by URL using API extraction.
 
         Args:
             url: Note URL or ID.
@@ -204,37 +217,77 @@ class XiaohongshuDownloader:
             console.print(f"[red]Invalid URL: {url}[/red]")
             return None
 
-        storage_state = self._get_storage_state()
-        if not storage_state:
+        state = self._get_storage_state()
+        if not state:
             console.print("[yellow]Not logged in. Please login first.[/yellow]")
             return None
 
-        context = await self.browser.new_context(storage_state=storage_state)
+        context = await self.browser.new_context(storage_state=state)
         page = await context.new_page()
 
         try:
-            note_url = f"{self.EXPLORE_URL}/{note_id}"
+            page_url = f"{self.EXPLORE_URL}/{note_id}"
             if xsec_token:
-                note_url = f"{note_url}?xsec_token={xsec_token}&xsec_source="
+                page_url += f"?xsec_token={xsec_token}&xsec_source="
 
             console.print(f"[cyan]Fetching note: {note_id}[/cyan]")
-            await page.goto(note_url, wait_until="commit", timeout=60000)
-            await asyncio.sleep(3)
 
-            # Check for error
-            error_msg = await page.query_selector(Selectors.NOTE_ERROR)
-            if error_msg:
-                console.print("[red]Note is not accessible.[/red]")
-                return None
+            # Navigate to note page
+            try:
+                await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass  # Timeout OK — page might be slow
 
-            # Extract note details
-            note = await self._extract_note(page, note_id)
+            await asyncio.sleep(2)
+
+            # Check if redirected (CAPTCHA or 404)
+            current_url = page.url
+            if "/404" in current_url or (
+                f"/explore/{note_id}" not in current_url
+                and note_id not in current_url
+            ):
+                console.print("[dim]Redirected, warming up session...[/dim]")
+
+                # Warm up: go to explore page first
+                if not await self._warm_up_session(page):
+                    console.print("[yellow]Session warm-up failed[/yellow]")
+                    await context.close()
+                    return None
+
+                # Retry navigation
+                try:
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+                if f"/explore/{note_id}" not in page.url and note_id not in page.url:
+                    console.print(f"[yellow]Cannot access note {note_id}, token may be expired[/yellow]")
+                    await context.close()
+                    return None
+
+            # Close login modal if present
+            await self._close_login_modal(page)
+
+            # Extract note from SSR state
+            note = await self._extract_from_ssr(page, note_id)
             if not note:
+                console.print("[yellow]SSR extraction failed, note may be inaccessible[/yellow]")
+                await context.close()
                 return None
 
-            # Fetch comments
+            # Fetch comments via API
             if fetch_comments:
-                note.comments = await self._extract_comments(page, max_comments)
+                comments = await self._fetch_comments_api(
+                    page, note_id, xsec_token, max_comments
+                )
+                note.comments = comments
+                note.comments_count = max(note.comments_count, len(comments))
+
+            console.print(
+                f"[green]Fetched: {note.title[:30]}{'...' if len(note.title) > 30 else ''} "
+                f"({len(note.images)} images, {len(note.comments)} comments)[/green]"
+            )
 
             # Download images
             if download_images and note.images:
@@ -250,75 +303,151 @@ class XiaohongshuDownloader:
                 json.dump(note.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
             console.print(f"[green]Saved content to {json_path}[/green]")
 
+            await context.close()
             return note
 
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
-            return None
-        finally:
             await context.close()
+            return None
 
-    async def _extract_note(self, page: Page, note_id: str) -> Optional[Note]:
-        """Extract note details from page."""
+    async def _warm_up_session(self, page: Page) -> bool:
+        """Navigate to explore page to establish session and pass CAPTCHA."""
         try:
-            await page.wait_for_selector('.note-content, #detail-title', timeout=10000)
+            console.print("[dim]Warming up session...[/dim]")
+            try:
+                await page.goto(self.EXPLORE_URL, wait_until="commit", timeout=60000)
+            except Exception:
+                pass
 
-            # Title
-            title = ""
-            title_el = await page.query_selector(Selectors.NOTE_TITLE)
-            if title_el:
-                title = (await title_el.text_content() or "").strip()
+            # Wait for page to settle
+            await asyncio.sleep(5)
 
-            # Content
-            content = ""
-            content_el = await page.query_selector(Selectors.NOTE_CONTENT)
-            if content_el:
-                content = (await content_el.text_content() or "").strip()
+            if "/explore" in page.url and "/404" not in page.url:
+                return True
 
-            # Images
-            images: List[str] = []
-            img_elements = await page.query_selector_all(Selectors.NOTE_IMAGES)
-            for img in img_elements:
-                src = await img.get_attribute("src")
-                if src and "http" in src:
-                    images.append(src)
+            # May be stuck on CAPTCHA — wait longer
+            console.print("[yellow]Waiting for CAPTCHA resolution...[/yellow]")
+            await asyncio.sleep(15)
+            return "/explore" in page.url and "/404" not in page.url
 
-            # Video
+        except Exception:
+            return False
+
+    async def _close_login_modal(self, page: Page):
+        """Close the login popup if it appears."""
+        try:
+            close_btn = await page.query_selector('.close-button, [class*="close"], .login-close')
+            if close_btn:
+                await close_btn.click()
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+
+    async def _extract_from_ssr(self, page: Page, note_id: str) -> Optional[Note]:
+        """Extract note data from __INITIAL_STATE__ SSR data."""
+        try:
+            data = await page.evaluate("""(noteId) => {
+                const state = window.__INITIAL_STATE__;
+                if (!state || !state.note || !state.note.noteDetailMap) return null;
+
+                const noteData = state.note.noteDetailMap[noteId];
+                if (!noteData || !noteData.note) return null;
+
+                const n = noteData.note;
+                return {
+                    noteId: n.noteId,
+                    title: n.title || '',
+                    desc: n.desc || '',
+                    type: n.type || 'normal',
+                    time: n.time,
+                    lastUpdateTime: n.lastUpdateTime,
+                    ipLocation: n.ipLocation || '',
+                    imageList: (n.imageList || []).map(img => ({
+                        width: img.width,
+                        height: img.height,
+                        urlDefault: img.urlDefault || '',
+                        urlPre: img.urlPre || '',
+                        infoList: (img.infoList || []).map(info => ({
+                            imageScene: info.imageScene,
+                            url: info.url,
+                        })),
+                    })),
+                    video: n.video ? {
+                        url: n.video.media?.stream?.h264?.[0]?.masterUrl || '',
+                        duration: n.video.duration || 0,
+                    } : null,
+                    tagList: (n.tagList || []).map(t => ({ id: t.id, name: t.name })),
+                    user: n.user ? {
+                        userId: n.user.userId || '',
+                        nickname: n.user.nickname || '',
+                        avatar: n.user.avatar || '',
+                    } : null,
+                    interactInfo: n.interactInfo ? {
+                        likedCount: n.interactInfo.likedCount || '0',
+                        collectedCount: n.interactInfo.collectedCount || '0',
+                        commentCount: n.interactInfo.commentCount || '0',
+                        shareCount: n.interactInfo.shareCount || '0',
+                    } : null,
+                };
+            }""", note_id)
+
+            if not data:
+                return None
+
+            # Build image URL list
+            images = []
+            for img in data.get("imageList", []):
+                url = img.get("urlDefault", "")
+                if not url:
+                    for info in img.get("infoList", []):
+                        if info.get("imageScene") == "WB_DFT":
+                            url = info["url"]
+                            break
+                if not url:
+                    for info in img.get("infoList", []):
+                        url = info.get("url", "")
+                        if url:
+                            break
+                if url:
+                    images.append(url)
+
+            # Video URL
             video_url = None
-            video_el = await page.query_selector(Selectors.NOTE_VIDEO)
-            if video_el:
-                video_url = await video_el.get_attribute("src")
+            if data.get("video"):
+                video_url = data["video"].get("url")
 
-            # Tags
-            tags: List[str] = []
-            tag_elements = await page.query_selector_all(Selectors.NOTE_TAGS)
-            for tag_el in tag_elements:
-                tag_text = await tag_el.text_content()
-                if tag_text:
-                    tag_text = tag_text.strip().replace("#", "")
-                    if tag_text and tag_text not in tags:
-                        tags.append(tag_text)
+            # Stats
+            interact = data.get("interactInfo") or {}
+            likes = self._parse_count(str(interact.get("likedCount", "0")))
+            collects = self._parse_count(str(interact.get("collectedCount", "0")))
+            comments_count = self._parse_count(str(interact.get("commentCount", "0")))
+            shares = self._parse_count(str(interact.get("shareCount", "0")))
 
             # Time
             publish_time = None
-            time_el = await page.query_selector(Selectors.NOTE_TIME)
-            if time_el:
-                time_text = await time_el.text_content() or ""
-                publish_time = self._parse_time(time_text)
+            ts = data.get("time")
+            if ts:
+                try:
+                    publish_time = datetime.fromtimestamp(ts / 1000)
+                except (ValueError, OSError):
+                    pass
 
             # Author
-            author = await self._extract_author(page)
+            user = data.get("user") or {}
+            author = Author(
+                user_id=user.get("userId", ""),
+                nickname=user.get("nickname", ""),
+                avatar=user.get("avatar", ""),
+            )
 
-            # Stats
-            likes = await self._extract_stat(page, "like")
-            comments_count = await self._extract_stat(page, "comment")
-            collects = await self._extract_stat(page, "collect")
-            shares = await self._extract_stat(page, "share")
+            # Tags
+            tags = [t["name"] for t in data.get("tagList", []) if t.get("name")]
 
             return Note(
-                note_id=note_id,
-                title=title,
-                content=content,
+                note_id=data.get("noteId", note_id),
+                title=data.get("title", ""),
+                content=data.get("desc", ""),
                 images=images,
                 video_url=video_url,
                 tags=tags,
@@ -328,117 +457,144 @@ class XiaohongshuDownloader:
                 comments_count=comments_count,
                 collects=collects,
                 shares=shares,
+                ip_location=data.get("ipLocation", ""),
+                note_type=data.get("type", "normal"),
             )
 
         except Exception as e:
-            console.print(f"[red]Error extracting note: {e}[/red]")
+            console.print(f"[dim]SSR extraction error: {e}[/dim]")
             return None
 
-    async def _extract_author(self, page: Page) -> Author:
-        """Extract author info."""
-        try:
-            container = await page.query_selector(Selectors.AUTHOR_CONTAINER)
-            if not container:
-                return Author()
+    async def _fetch_comments_api(
+        self,
+        page: Page,
+        note_id: str,
+        xsec_token: str,
+        max_comments: int = 50,
+    ) -> List[Comment]:
+        """Fetch comments via browser API (service worker auto-signs)."""
+        all_comments = []
+        cursor = ""
 
-            link = await container.query_selector(Selectors.AUTHOR_LINK)
-            user_id = ""
-            if link:
-                href = await link.get_attribute("href") or ""
-                parts = href.strip("/").split("/")
-                if len(parts) >= 3 and parts[0] == "user" and parts[1] == "profile":
-                    user_id = parts[2]
+        while len(all_comments) < max_comments:
+            try:
+                result = await page.evaluate("""async ({noteId, xsecToken, cursor}) => {
+                    const params = new URLSearchParams({
+                        note_id: noteId,
+                        cursor: cursor,
+                        top_comment_id: '',
+                        image_formats: 'jpg,webp,avif',
+                        xsec_token: xsecToken,
+                    });
+                    const url = `https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?${params}`;
 
-            nickname = ""
-            name_el = await container.query_selector('.name, .username')
-            if name_el:
-                nickname = (await name_el.text_content() or "").strip()
+                    const resp = await fetch(url, {
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: {
+                            'Accept': 'application/json, text/plain, */*',
+                            'Origin': 'https://www.xiaohongshu.com',
+                            'Referer': 'https://www.xiaohongshu.com/',
+                        },
+                    });
 
-            avatar = ""
-            avatar_el = await container.query_selector('img.avatar-item, .avatar img, img')
-            if avatar_el:
-                avatar = await avatar_el.get_attribute("src") or ""
+                    const data = await resp.json();
+                    if (!data.data) return { comments: [], hasMore: false, cursor: '' };
 
-            return Author(user_id=user_id, nickname=nickname, avatar=avatar)
-        except Exception:
-            return Author()
+                    return {
+                        comments: (data.data.comments || []).map(c => ({
+                            id: c.id,
+                            content: c.content,
+                            likeCount: c.like_count || '0',
+                            createTime: c.create_time,
+                            ipLocation: c.ip_location || '',
+                            user: c.user_info ? {
+                                userId: c.user_info.user_id,
+                                nickname: c.user_info.nickname,
+                                avatar: c.user_info.image,
+                            } : null,
+                            subComments: (c.sub_comments || []).map(sc => ({
+                                id: sc.id,
+                                content: sc.content,
+                                likeCount: sc.like_count || '0',
+                                createTime: sc.create_time,
+                                ipLocation: sc.ip_location || '',
+                                user: sc.user_info ? {
+                                    userId: sc.user_info.user_id,
+                                    nickname: sc.user_info.nickname,
+                                    avatar: sc.user_info.image,
+                                } : null,
+                            })),
+                        })),
+                        hasMore: data.data.has_more || false,
+                        cursor: data.data.cursor || '',
+                    };
+                }""", {"noteId": note_id, "xsecToken": xsec_token, "cursor": cursor})
 
-    async def _extract_stat(self, page: Page, stat_type: str) -> int:
-        """Extract engagement stat."""
-        try:
-            el = await page.query_selector(f'[class*="{stat_type}"] [class*="count"], [class*="{stat_type}"] span')
-            if el:
-                text = await el.text_content() or "0"
-                return self._parse_count(text)
-            return 0
-        except Exception:
-            return 0
+                if not result or not result.get("comments"):
+                    break
 
-    async def _extract_comments(self, page: Page, max_comments: int) -> List[Comment]:
-        """Extract comments from page."""
-        comments: List[Comment] = []
+                for c in result["comments"]:
+                    comment = self._build_comment(c)
+                    if comment:
+                        all_comments.append(comment)
 
-        try:
-            # Scroll to comments
-            section = await page.query_selector(Selectors.COMMENTS_CONTAINER)
-            if section:
-                await section.scroll_into_view_if_needed()
-                await asyncio.sleep(2)
+                if not result.get("hasMore"):
+                    break
 
-            # Extract comment items
-            items = await page.query_selector_all(Selectors.COMMENT_ITEM)
+                cursor = result.get("cursor", "")
+                if not cursor:
+                    break
 
-            for item in items[:max_comments]:
-                try:
-                    # Content
-                    content = ""
-                    content_el = await item.query_selector(Selectors.COMMENT_CONTENT)
-                    if content_el:
-                        content = (await content_el.text_content() or "").strip()
+                await asyncio.sleep(0.5)
 
-                    if not content:
-                        continue
+            except Exception as e:
+                console.print(f"[dim]Comment fetch error: {e}[/dim]")
+                break
 
-                    # Author
-                    author_name = ""
-                    name_el = await item.query_selector(Selectors.COMMENT_AUTHOR_NAME)
-                    if name_el:
-                        author_name = (await name_el.text_content() or "").strip()
+        return all_comments[:max_comments]
 
-                    # Likes
-                    likes = 0
-                    likes_el = await item.query_selector(Selectors.COMMENT_LIKES)
-                    if likes_el:
-                        likes_text = await likes_el.text_content() or "0"
-                        likes = self._parse_count(likes_text)
+    def _build_comment(self, data: dict) -> Optional[Comment]:
+        """Build a Comment object from API response data."""
+        if not data or not data.get("content"):
+            return None
 
-                    # Time
-                    create_time = None
-                    time_el = await item.query_selector(Selectors.COMMENT_TIME)
-                    if time_el:
-                        time_text = await time_el.text_content() or ""
-                        create_time = self._parse_time(time_text)
+        user = data.get("user") or {}
+        author = Author(
+            user_id=user.get("userId", ""),
+            nickname=user.get("nickname", ""),
+            avatar=user.get("avatar", ""),
+        )
 
-                    comments.append(Comment(
-                        comment_id=str(hash(content))[:12],
-                        content=content,
-                        author=Author(nickname=author_name),
-                        likes=likes,
-                        create_time=create_time,
-                    ))
+        create_time = None
+        ts = data.get("createTime")
+        if ts:
+            try:
+                create_time = datetime.fromtimestamp(ts / 1000)
+            except (ValueError, OSError):
+                pass
 
-                except Exception:
-                    continue
+        # Sub-comments
+        sub_comments = []
+        for sc in data.get("subComments", []):
+            sub = self._build_comment(sc)
+            if sub:
+                sub_comments.append(sub)
 
-        except Exception as e:
-            console.print(f"[dim]Warning extracting comments: {e}[/dim]")
-
-        return comments
+        return Comment(
+            comment_id=data.get("id", ""),
+            content=data.get("content", ""),
+            author=author,
+            likes=self._parse_count(str(data.get("likeCount", "0"))),
+            create_time=create_time,
+            sub_comments=sub_comments,
+            ip_location=data.get("ipLocation", ""),
+        )
 
     async def _download_images(self, urls: List[str], output_dir: Path):
         """Download images to directory."""
         async with httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
             follow_redirects=True,
         ) as client:
             for i, url in enumerate(urls):
@@ -470,40 +626,3 @@ class XiaohongshuDownloader:
                 return int(float(clean)) if clean else 0
         except Exception:
             return 0
-
-    @staticmethod
-    def _parse_time(text: str) -> Optional[datetime]:
-        """Parse time from various formats."""
-        text = text.strip()
-
-        patterns = [
-            r"(\d{4})-(\d{2})-(\d{2})",
-            r"(\d{4})年(\d{1,2})月(\d{1,2})日",
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                groups = match.groups()
-                try:
-                    year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
-                    return datetime(year, month, day)
-                except Exception:
-                    continue
-
-        if "刚刚" in text or "秒前" in text:
-            return datetime.now()
-        elif "分钟前" in text:
-            match = re.search(r"(\d+)分钟前", text)
-            if match:
-                return datetime.now() - timedelta(minutes=int(match.group(1)))
-        elif "小时前" in text:
-            match = re.search(r"(\d+)小时前", text)
-            if match:
-                return datetime.now() - timedelta(hours=int(match.group(1)))
-        elif "天前" in text:
-            match = re.search(r"(\d+)天前", text)
-            if match:
-                return datetime.now() - timedelta(days=int(match.group(1)))
-
-        return None
