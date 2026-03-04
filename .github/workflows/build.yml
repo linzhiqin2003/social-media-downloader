@@ -54,6 +54,7 @@ jobs:
         run: |
           poetry run pyinstaller \
             --onedir --windowed --name "Social Media Downloader" \
+            --icon assets/icon.icns \
             --collect-all httpx --collect-all typer --collect-all rich \
             --collect-all pydantic --collect-all PyQt5 \
             --hidden-import src.xiaohongshu --hidden-import src.weibo \
