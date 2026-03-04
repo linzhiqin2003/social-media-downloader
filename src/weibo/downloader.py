@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import List, Optional
@@ -428,8 +429,8 @@ class WeiboDownloader:
     async def _download_images(
         self, urls: List[str], output_dir: Path, client: httpx.AsyncClient
     ):
-        """Download images to directory."""
-        for i, url in enumerate(urls):
+        """Download images to directory, named by content hash."""
+        for url in urls:
             try:
                 response = await client.get(url, timeout=30.0)
                 if response.status_code == 200:
@@ -442,7 +443,8 @@ class WeiboDownloader:
                     elif "webp" in content_type:
                         ext = ".webp"
 
-                    path = output_dir / f"image_{i+1:02d}{ext}"
+                    name = hashlib.md5(response.content).hexdigest()
+                    path = output_dir / f"{name}{ext}"
                     path.write_bytes(response.content)
             except Exception:
                 continue
