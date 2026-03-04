@@ -1,15 +1,17 @@
-"""Weibo content downloader."""
+"""Weibo content downloader — pure HTTP, no browser dependency.
+
+- Post data: API /ajax/statuses/show
+- Comments: API /ajax/statuses/buildComments
+- Images: direct CDN download
+"""
 
 import asyncio
 import json
-import re
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlparse
 
 import httpx
-from playwright.async_api import async_playwright, Browser
 from pydantic import BaseModel, Field
 from rich.console import Console
 
@@ -51,99 +53,141 @@ class WeiboPost(BaseModel):
 # ============ Downloader ============
 
 class WeiboDownloader:
-    """Download content from Weibo."""
+    """Pure HTTP downloader for Weibo (no Playwright)."""
 
     BASE_URL = "https://weibo.com"
-    MOBILE_URL = "https://m.weibo.cn"
     DATA_DIR = Path.home() / ".social_media_downloader" / "weibo"
 
     DETAIL_API = "/ajax/statuses/show"
     COMMENTS_API = "/ajax/statuses/buildComments"
 
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://weibo.com/",
+    }
+
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.storage_path = self.DATA_DIR / "browser_state.json"
-        self.browser: Optional[Browser] = None
-        self.playwright = None
+        self.cookie_path = self.DATA_DIR / "cookies.json"
 
     async def __aenter__(self):
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-        )
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        pass
 
-    def _get_storage_state(self) -> Optional[str]:
-        """Load storage state path."""
-        if self.storage_path.exists():
-            return str(self.storage_path)
-        return None
+    # ---- Cookie management ----
 
-    def _get_cookies_for_httpx(self) -> dict:
-        """Load cookies for httpx."""
-        if not self.storage_path.exists():
+    def _load_cookies(self) -> dict:
+        """Load cookies as {name: value} dict."""
+        if not self.cookie_path.exists():
             return {}
 
-        with open(self.storage_path, "r") as f:
-            state = json.load(f)
+        try:
+            with open(self.cookie_path, "r") as f:
+                data = json.load(f)
 
-        cookies = {}
-        for cookie in state.get("cookies", []):
-            if "weibo" in cookie.get("domain", ""):
-                cookies[cookie["name"]] = cookie["value"]
-        return cookies
+            # Playwright storage_state format
+            if isinstance(data, dict) and "cookies" in data:
+                cookies = {}
+                for c in data["cookies"]:
+                    if "weibo" in c.get("domain", ""):
+                        cookies[c["name"]] = c["value"]
+                return cookies
 
-    async def login(self) -> bool:
-        """Interactive login."""
-        console.print("[cyan]Opening browser for login...[/cyan]")
-        console.print("[yellow]Please login to Weibo, then press Enter when done.[/yellow]")
+            # Plain cookie list [{name, value, ...}, ...]
+            if isinstance(data, list):
+                return {c["name"]: c["value"] for c in data}
 
-        context = await self.browser.new_context()
-        page = await context.new_page()
-
-        await page.goto(self.BASE_URL)
-        await asyncio.sleep(2)
-
-        input("Press Enter after you've logged in...")
-
-        # Save storage state
-        storage = await context.storage_state()
-        with open(self.storage_path, "w") as f:
-            json.dump(storage, f)
-
-        await context.close()
-        console.print("[green]Login successful! State saved.[/green]")
-        return True
+            return {}
+        except Exception:
+            return {}
 
     async def check_login(self) -> bool:
-        """Check if logged in."""
-        if not self.storage_path.exists():
-            return False
-
-        cookies = self._get_cookies_for_httpx()
+        """Check if cookies exist and are valid."""
+        cookies = self._load_cookies()
         if not cookies:
             return False
 
-        # Try to access a protected endpoint
+        # Quick check: try an API endpoint
         try:
-            async with httpx.AsyncClient(cookies=cookies) as client:
+            async with httpx.AsyncClient(
+                cookies=cookies, headers=self.HEADERS, timeout=10.0
+            ) as client:
                 response = await client.get(
-                    f"{self.BASE_URL}/ajax/side/hotSearch",
-                    headers={"User-Agent": "Mozilla/5.0"},
+                    f"{self.BASE_URL}/ajax/side/hotSearch"
                 )
                 return response.status_code == 200
         except Exception:
             return False
+
+    async def login(self) -> bool:
+        """Guide user to import cookies from browser."""
+        console.print()
+        console.print("[bold cyan]微博 Cookie 导入指南[/bold cyan]")
+        console.print()
+        console.print("1. 在浏览器中打开 [link=https://weibo.com]weibo.com[/link] 并登录")
+        console.print("2. 按 F12 打开开发者工具 → 控制台 (Console)")
+        console.print("3. 粘贴以下代码并回车：")
+        console.print()
+        console.print(
+            "[dim]copy(document.cookie.split('; ')"
+            ".map(c => { const [n,...v] = c.split('='); "
+            "return {name:n, value:v.join('=')} }))[/dim]"
+        )
+        console.print()
+        console.print("4. 已复制到剪贴板，粘贴到下面：")
+        console.print()
+
+        raw = input("粘贴 Cookie JSON > ").strip()
+        if not raw:
+            console.print("[red]未输入内容[/red]")
+            return False
+
+        try:
+            cookies = json.loads(raw)
+            if not isinstance(cookies, list):
+                raise ValueError("not a list")
+
+            with open(self.cookie_path, "w") as f:
+                json.dump(cookies, f, ensure_ascii=False)
+
+            names = {c["name"] for c in cookies}
+            if "SUB" in names or "SUBP" in names:
+                console.print("[green]Cookie 导入成功！[/green]")
+                return True
+            else:
+                console.print("[yellow]Cookie 已保存，但缺少关键 cookie (SUB/SUBP)[/yellow]")
+                console.print("[dim]请确保已登录后再导出[/dim]")
+                return False
+
+        except (json.JSONDecodeError, ValueError):
+            # Maybe user pasted raw cookie string: "name1=val1; name2=val2"
+            if "=" in raw and ";" in raw:
+                try:
+                    cookies = []
+                    for pair in raw.split(";"):
+                        pair = pair.strip()
+                        if "=" in pair:
+                            name, value = pair.split("=", 1)
+                            cookies.append({"name": name.strip(), "value": value.strip()})
+
+                    with open(self.cookie_path, "w") as f:
+                        json.dump(cookies, f, ensure_ascii=False)
+
+                    console.print("[green]Cookie 导入成功！[/green]")
+                    return True
+                except Exception:
+                    pass
+
+            console.print("[red]无法解析 Cookie，请重试[/red]")
+            return False
+
+    # ---- URL parsing ----
 
     @staticmethod
     def parse_url(url: str) -> Optional[str]:
@@ -176,6 +220,8 @@ class WeiboDownloader:
 
         return None
 
+    # ---- Download ----
+
     async def download(
         self,
         url: str,
@@ -184,37 +230,24 @@ class WeiboDownloader:
         max_comments: int = 50,
         download_images: bool = True,
     ) -> Optional[WeiboPost]:
-        """Download a post by URL.
-
-        Args:
-            url: Post URL or MID.
-            output_dir: Directory to save content.
-            fetch_comments: Whether to fetch comments.
-            max_comments: Maximum comments to fetch.
-            download_images: Whether to download images.
-
-        Returns:
-            WeiboPost object with content.
-        """
+        """Download a post by URL (pure HTTP)."""
         mid = self.parse_url(url)
         if not mid:
             console.print(f"[red]Invalid URL: {url}[/red]")
             return None
 
-        cookies = self._get_cookies_for_httpx()
+        cookies = self._load_cookies()
         if not cookies:
-            console.print("[yellow]Not logged in. Please login first.[/yellow]")
+            console.print("[yellow]未登录，请先导入 Cookie[/yellow]")
             return None
 
         console.print(f"[cyan]Fetching post: {mid}[/cyan]")
 
         async with httpx.AsyncClient(
             cookies=cookies,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                "Referer": self.BASE_URL,
-            },
+            headers=self.HEADERS,
             follow_redirects=True,
+            timeout=30.0,
         ) as client:
 
             # Fetch post details
@@ -225,7 +258,9 @@ class WeiboDownloader:
 
             # Fetch comments
             if fetch_comments and post.comments_count > 0:
-                post.comments = await self._fetch_comments(client, mid, post.user.id, max_comments)
+                post.comments = await self._fetch_comments(
+                    client, mid, post.user.id, max_comments
+                )
                 console.print(f"[green]Fetched {len(post.comments)} comments[/green]")
 
             # Download images
@@ -233,7 +268,9 @@ class WeiboDownloader:
                 post_dir = output_dir / mid
                 post_dir.mkdir(parents=True, exist_ok=True)
                 await self._download_images(post.images, post_dir, client)
-                console.print(f"[green]Downloaded {len(post.images)} images to {post_dir}[/green]")
+                console.print(
+                    f"[green]Downloaded {len(post.images)} images to {post_dir}[/green]"
+                )
 
             # Save JSON
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -244,7 +281,9 @@ class WeiboDownloader:
 
             return post
 
-    async def _fetch_post(self, client: httpx.AsyncClient, mid: str) -> Optional[WeiboPost]:
+    async def _fetch_post(
+        self, client: httpx.AsyncClient, mid: str
+    ) -> Optional[WeiboPost]:
         """Fetch post details via API."""
         try:
             response = await client.get(
@@ -270,7 +309,6 @@ class WeiboDownloader:
             images = []
             pic_infos = data.get("pic_infos", {})
             for pic_id, pic_data in pic_infos.items():
-                # Prefer largest size
                 for size in ["original", "large", "mw2000", "mw1024"]:
                     url = pic_data.get(size, {}).get("url")
                     if url:
@@ -282,7 +320,9 @@ class WeiboDownloader:
             page_info = data.get("page_info", {})
             if page_info.get("type") == "video":
                 media_info = page_info.get("media_info", {})
-                video_url = media_info.get("stream_url_hd") or media_info.get("stream_url")
+                video_url = (
+                    media_info.get("stream_url_hd") or media_info.get("stream_url")
+                )
 
             return WeiboPost(
                 mid=mid,
@@ -365,13 +405,14 @@ class WeiboDownloader:
 
         return comments
 
-    async def _download_images(self, urls: List[str], output_dir: Path, client: httpx.AsyncClient):
+    async def _download_images(
+        self, urls: List[str], output_dir: Path, client: httpx.AsyncClient
+    ):
         """Download images to directory."""
         for i, url in enumerate(urls):
             try:
                 response = await client.get(url, timeout=30.0)
                 if response.status_code == 200:
-                    # Determine extension
                     ext = ".jpg"
                     content_type = response.headers.get("content-type", "")
                     if "png" in content_type:

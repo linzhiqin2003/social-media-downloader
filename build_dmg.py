@@ -78,7 +78,6 @@ def main():
         "--name", "Social Media Downloader",
         "--windowed",  # Creates .app bundle
         "--onedir",    # Better for .app
-        "--collect-all", "playwright",
         "--collect-all", "httpx",
         "--collect-all", "typer",
         "--collect-all", "rich",

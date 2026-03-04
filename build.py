@@ -38,13 +38,6 @@ def main():
                 Path(path).unlink()
             print(f"Cleaned: {path}")
 
-    # Install playwright browsers first
-    print("\nInstalling Playwright browsers...")
-    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-
-    # Get playwright browser path for bundling
-    # Note: This is complex, so we'll use --collect-all instead
-
     # Build with PyInstaller
     print("\nBuilding executable...")
 
@@ -60,7 +53,6 @@ def main():
         "--name", "smd",
         "--console",
         # Collect all required packages
-        "--collect-all", "playwright",
         "--collect-all", "httpx",
         "--collect-all", "typer",
         "--collect-all", "rich",
@@ -93,15 +85,10 @@ def main():
 
     if dist_path.exists():
         print("\n" + "=" * 50)
-        print(f"[SUCCESS] Build complete!")
+        print("[SUCCESS] Build complete!")
         print(f"Executable: {dist_path}")
         print(f"Size: {dist_path.stat().st_size / 1024 / 1024:.1f} MB")
         print("=" * 50)
-
-        print("\nIMPORTANT: Before running the executable, you need to:")
-        print("1. Install Playwright browsers on the target machine:")
-        print("   playwright install chromium")
-        print("\nOr distribute with the browser bundled (see README).")
     else:
         print("\n[ERROR] Build failed - executable not found")
         sys.exit(1)

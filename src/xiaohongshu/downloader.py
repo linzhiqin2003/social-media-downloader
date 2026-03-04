@@ -1,12 +1,10 @@
-"""Xiaohongshu API-based content downloader.
+"""Xiaohongshu downloader — pure HTTP, no browser dependency.
 
-Uses Playwright as a signing oracle:
-- Note detail: extracted from SSR __INITIAL_STATE__ (no API signing needed)
-- Comments: fetched via /api/sns/web/v2/comment/page through browser's network stack
-- Images: direct CDN download (no auth needed)
+- Note data: HTTP GET + parse __INITIAL_STATE__ from SSR HTML
+- Images: direct CDN download
+- Comments: not supported (requires browser signing)
 """
 
-import asyncio
 import json
 import re
 from datetime import datetime
@@ -14,7 +12,6 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import httpx
-from playwright.async_api import async_playwright, Page, Browser
 from pydantic import BaseModel, Field
 from rich.console import Console
 
@@ -24,25 +21,12 @@ console = Console()
 # ============ Data Models ============
 
 class Author(BaseModel):
-    """Author information."""
     user_id: str = ""
     nickname: str = ""
     avatar: str = ""
 
 
-class Comment(BaseModel):
-    """Comment information."""
-    comment_id: str = ""
-    content: str = ""
-    author: Author = Field(default_factory=Author)
-    likes: int = 0
-    create_time: Optional[datetime] = None
-    sub_comments: List["Comment"] = Field(default_factory=list)
-    ip_location: str = ""
-
-
 class Note(BaseModel):
-    """Full note information."""
     note_id: str
     title: str = ""
     content: str = ""
@@ -55,7 +39,6 @@ class Note(BaseModel):
     comments_count: int = 0
     collects: int = 0
     shares: int = 0
-    comments: List[Comment] = Field(default_factory=list)
     ip_location: str = ""
     note_type: str = "normal"
 
@@ -63,121 +46,139 @@ class Note(BaseModel):
 # ============ Downloader ============
 
 class XiaohongshuDownloader:
-    """API-based downloader for Xiaohongshu."""
+    """Pure HTTP downloader for Xiaohongshu (no Playwright)."""
 
     BASE_URL = "https://www.xiaohongshu.com"
     EXPLORE_URL = f"{BASE_URL}/explore"
     DATA_DIR = Path.home() / ".social_media_downloader" / "xiaohongshu"
 
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.xiaohongshu.com/",
+    }
+
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.cookie_path = self.DATA_DIR / "cookies.json"
-        self.browser: Optional[Browser] = None
-        self.playwright = None
-        self._session_warm = False  # Track if session is warmed up
 
     async def __aenter__(self):
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-        )
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        pass
 
-    def _get_storage_state(self) -> Optional[dict]:
-        """Load storage state (Playwright format) from file.
+    # ---- Cookie management ----
 
-        Handles two cookie formats:
-        - Playwright storage_state: {"cookies": [...], "origins": [...]}
-        - Plain cookie list: [{name, value, domain, ...}, ...]
-        """
+    def _load_cookies(self) -> dict:
+        """Load cookies as {name: value} dict."""
         if not self.cookie_path.exists():
-            return None
+            return {}
 
         try:
             with open(self.cookie_path, "r") as f:
                 data = json.load(f)
 
-            # Already in storage_state format
+            # Playwright storage_state format
             if isinstance(data, dict) and "cookies" in data:
-                return data
+                return {c["name"]: c["value"] for c in data["cookies"]}
 
-            # Plain cookie list — wrap into storage_state format
+            # Plain cookie list [{name, value, ...}, ...]
             if isinstance(data, list):
-                return {"cookies": data, "origins": []}
+                return {c["name"]: c["value"] for c in data}
 
-            return None
+            return {}
         except Exception:
-            return None
-
-    async def login(self) -> bool:
-        """Interactive login via QR code."""
-        console.print("[cyan]Opening browser for login...[/cyan]")
-        console.print("[yellow]Please scan QR code to login, then press Enter when done.[/yellow]")
-
-        context = await self.browser.new_context()
-        page = await context.new_page()
-
-        await page.goto(self.BASE_URL)
-        await asyncio.sleep(2)
-
-        # Wait for user to login
-        input("Press Enter after you've logged in...")
-
-        # Save cookies
-        storage = await context.storage_state()
-        with open(self.cookie_path, "w") as f:
-            json.dump(storage, f)
-
-        await context.close()
-        console.print("[green]Login successful! Cookies saved.[/green]")
-        return True
+            return {}
 
     async def check_login(self) -> bool:
-        """Check if logged in (lightweight: just check cookie file)."""
-        state = self._get_storage_state()
-        if not state:
+        """Check if cookies exist and contain essential keys."""
+        cookies = self._load_cookies()
+        return "web_session" in cookies or "a1" in cookies
+
+    async def login(self) -> bool:
+        """Guide user to import cookies from browser."""
+        console.print()
+        console.print("[bold cyan]小红书 Cookie 导入指南[/bold cyan]")
+        console.print()
+        console.print("1. 在浏览器中打开 [link=https://www.xiaohongshu.com]xiaohongshu.com[/link] 并登录")
+        console.print("2. 按 F12 打开开发者工具 → 控制台 (Console)")
+        console.print("3. 粘贴以下代码并回车：")
+        console.print()
+        console.print(
+            "[dim]copy(document.cookie.split('; ')"
+            ".map(c => { const [n,...v] = c.split('='); "
+            "return {name:n, value:v.join('=')} }))[/dim]"
+        )
+        console.print()
+        console.print("4. 已复制到剪贴板，粘贴到下面：")
+        console.print()
+
+        raw = input("粘贴 Cookie JSON > ").strip()
+        if not raw:
+            console.print("[red]未输入内容[/red]")
             return False
 
         try:
-            cookies = state.get("cookies", [])
-            cookie_names = {c.get("name", "") for c in cookies}
-            return "web_session" in cookie_names or "a1" in cookie_names
-        except Exception:
+            cookies = json.loads(raw)
+            if not isinstance(cookies, list):
+                raise ValueError("not a list")
+
+            # Save
+            with open(self.cookie_path, "w") as f:
+                json.dump(cookies, f, ensure_ascii=False)
+
+            names = {c["name"] for c in cookies}
+            if "web_session" in names or "a1" in names:
+                console.print("[green]Cookie 导入成功！[/green]")
+                return True
+            else:
+                console.print("[yellow]Cookie 已保存，但缺少关键 cookie (web_session/a1)[/yellow]")
+                console.print("[dim]请确保已登录后再导出[/dim]")
+                return False
+
+        except (json.JSONDecodeError, ValueError):
+            # Maybe user pasted raw cookie string: "name1=val1; name2=val2"
+            if "=" in raw and ";" in raw:
+                try:
+                    cookies = []
+                    for pair in raw.split(";"):
+                        pair = pair.strip()
+                        if "=" in pair:
+                            name, value = pair.split("=", 1)
+                            cookies.append({"name": name.strip(), "value": value.strip()})
+
+                    with open(self.cookie_path, "w") as f:
+                        json.dump(cookies, f, ensure_ascii=False)
+
+                    console.print("[green]Cookie 导入成功！[/green]")
+                    return True
+                except Exception:
+                    pass
+
+            console.print("[red]无法解析 Cookie，请重试[/red]")
             return False
+
+    # ---- URL parsing ----
 
     @staticmethod
     def parse_url(url: str) -> Tuple[str, str]:
-        """Parse note_id and xsec_token from a XHS URL.
-
-        Supports formats:
-        - https://www.xiaohongshu.com/explore/{note_id}?xsec_token=...
-        - https://www.xiaohongshu.com/discovery/item/{note_id}?...
-        - https://xhslink.com/xxx (short link)
-        - Just a note_id string
-        """
+        """Parse note_id and xsec_token from URL."""
         note_id = ""
         xsec_token = ""
 
-        # Extract note_id
-        patterns = [
+        for pattern in [
             r'/explore/([a-zA-Z0-9]+)',
             r'/discovery/item/([a-zA-Z0-9]+)',
             r'/note/([a-zA-Z0-9]+)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                note_id = match.group(1)
+        ]:
+            m = re.search(pattern, url)
+            if m:
+                note_id = m.group(1)
                 break
 
         if not note_id:
@@ -185,12 +186,13 @@ class XiaohongshuDownloader:
             if re.match(r'^[a-zA-Z0-9]+$', clean):
                 note_id = clean
 
-        # Extract xsec_token
-        token_match = re.search(r'xsec_token=([^&]+)', url)
-        if token_match:
-            xsec_token = token_match.group(1)
+        m = re.search(r'xsec_token=([^&]+)', url)
+        if m:
+            xsec_token = m.group(1)
 
         return note_id, xsec_token
+
+    # ---- Download ----
 
     async def download(
         self,
@@ -200,209 +202,99 @@ class XiaohongshuDownloader:
         max_comments: int = 50,
         download_images: bool = True,
     ) -> Optional[Note]:
-        """Download a note by URL using API extraction.
-
-        Args:
-            url: Note URL or ID.
-            output_dir: Directory to save content.
-            fetch_comments: Whether to fetch comments.
-            max_comments: Maximum comments to fetch.
-            download_images: Whether to download images.
-
-        Returns:
-            Note object with content.
-        """
+        """Download a note by URL (pure HTTP)."""
         note_id, xsec_token = self.parse_url(url)
         if not note_id:
             console.print(f"[red]Invalid URL: {url}[/red]")
             return None
 
-        state = self._get_storage_state()
-        if not state:
-            console.print("[yellow]Not logged in. Please login first.[/yellow]")
+        cookies = self._load_cookies()
+        if not cookies:
+            console.print("[yellow]未登录，请先导入 Cookie[/yellow]")
             return None
 
-        context = await self.browser.new_context(storage_state=state)
-        page = await context.new_page()
+        page_url = f"{self.EXPLORE_URL}/{note_id}"
+        if xsec_token:
+            page_url += f"?xsec_token={xsec_token}&xsec_source="
 
-        try:
-            page_url = f"{self.EXPLORE_URL}/{note_id}"
-            if xsec_token:
-                page_url += f"?xsec_token={xsec_token}&xsec_source="
+        console.print(f"[cyan]Fetching note: {note_id}[/cyan]")
 
-            console.print(f"[cyan]Fetching note: {note_id}[/cyan]")
-
-            # Navigate to note page
+        async with httpx.AsyncClient(
+            cookies=cookies,
+            headers=self.HEADERS,
+            follow_redirects=True,
+            timeout=30.0,
+        ) as client:
             try:
-                await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass  # Timeout OK — page might be slow
-
-            await asyncio.sleep(2)
-
-            # Check if redirected (CAPTCHA or 404)
-            current_url = page.url
-            if "/404" in current_url or (
-                f"/explore/{note_id}" not in current_url
-                and note_id not in current_url
-            ):
-                console.print("[dim]Redirected, warming up session...[/dim]")
-
-                # Warm up: go to explore page first
-                if not await self._warm_up_session(page):
-                    console.print("[yellow]Session warm-up failed[/yellow]")
-                    await context.close()
-                    return None
-
-                # Retry navigation
-                try:
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
-                except Exception:
-                    pass
-                await asyncio.sleep(2)
-
-                if f"/explore/{note_id}" not in page.url and note_id not in page.url:
-                    console.print(f"[yellow]Cannot access note {note_id}, token may be expired[/yellow]")
-                    await context.close()
-                    return None
-
-            # Close login modal if present
-            await self._close_login_modal(page)
-
-            # Extract note from SSR state
-            note = await self._extract_from_ssr(page, note_id)
-            if not note:
-                console.print("[yellow]SSR extraction failed, note may be inaccessible[/yellow]")
-                await context.close()
+                resp = await client.get(page_url)
+            except Exception as e:
+                console.print(f"[red]HTTP error: {e}[/red]")
                 return None
 
-            # Fetch comments via API
-            if fetch_comments:
-                comments = await self._fetch_comments_api(
-                    page, note_id, xsec_token, max_comments
-                )
-                note.comments = comments
-                note.comments_count = max(note.comments_count, len(comments))
+            if resp.status_code != 200:
+                console.print(f"[red]HTTP {resp.status_code}[/red]")
+                return None
 
-            console.print(
-                f"[green]Fetched: {note.title[:30]}{'...' if len(note.title) > 30 else ''} "
-                f"({len(note.images)} images, {len(note.comments)} comments)[/green]"
-            )
+            # Extract __INITIAL_STATE__ from HTML
+            note = self._extract_from_html(resp.text, note_id)
+            if not note:
+                if "验证" in resp.text or "/404" in str(resp.url):
+                    console.print("[yellow]需要验证码或页面不可访问，xsec_token 可能已过期[/yellow]")
+                else:
+                    console.print("[yellow]SSR 数据提取失败[/yellow]")
+                return None
+
+            title_preview = (note.title[:30] + "...") if len(note.title) > 30 else note.title
+            console.print(f"[green]Fetched: {title_preview} ({len(note.images)} images)[/green]")
 
             # Download images
             if download_images and note.images:
                 note_dir = output_dir / note_id
                 note_dir.mkdir(parents=True, exist_ok=True)
-                await self._download_images(note.images, note_dir)
-                console.print(f"[green]Downloaded {len(note.images)} images to {note_dir}[/green]")
+                await self._download_images(note.images, note_dir, client)
+                console.print(f"[green]Downloaded {len(note.images)} images → {note_dir}[/green]")
 
             # Save JSON
             output_dir.mkdir(parents=True, exist_ok=True)
             json_path = output_dir / f"{note_id}.json"
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(note.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
-            console.print(f"[green]Saved content to {json_path}[/green]")
+            console.print(f"[green]Saved → {json_path}[/green]")
 
-            await context.close()
             return note
 
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
-            await context.close()
-            return None
+    # ---- SSR extraction ----
 
-    async def _warm_up_session(self, page: Page) -> bool:
-        """Navigate to explore page to establish session and pass CAPTCHA."""
+    def _extract_from_html(self, html: str, note_id: str) -> Optional[Note]:
+        """Extract note from __INITIAL_STATE__ in HTML."""
         try:
-            console.print("[dim]Warming up session...[/dim]")
-            try:
-                await page.goto(self.EXPLORE_URL, wait_until="commit", timeout=60000)
-            except Exception:
-                pass
-
-            # Wait for page to settle
-            await asyncio.sleep(5)
-
-            if "/explore" in page.url and "/404" not in page.url:
-                return True
-
-            # May be stuck on CAPTCHA — wait longer
-            console.print("[yellow]Waiting for CAPTCHA resolution...[/yellow]")
-            await asyncio.sleep(15)
-            return "/explore" in page.url and "/404" not in page.url
-
-        except Exception:
-            return False
-
-    async def _close_login_modal(self, page: Page):
-        """Close the login popup if it appears."""
-        try:
-            close_btn = await page.query_selector('.close-button, [class*="close"], .login-close')
-            if close_btn:
-                await close_btn.click()
-                await asyncio.sleep(0.5)
-        except Exception:
-            pass
-
-    async def _extract_from_ssr(self, page: Page, note_id: str) -> Optional[Note]:
-        """Extract note data from __INITIAL_STATE__ SSR data."""
-        try:
-            data = await page.evaluate("""(noteId) => {
-                const state = window.__INITIAL_STATE__;
-                if (!state || !state.note || !state.note.noteDetailMap) return null;
-
-                const noteData = state.note.noteDetailMap[noteId];
-                if (!noteData || !noteData.note) return null;
-
-                const n = noteData.note;
-                return {
-                    noteId: n.noteId,
-                    title: n.title || '',
-                    desc: n.desc || '',
-                    type: n.type || 'normal',
-                    time: n.time,
-                    lastUpdateTime: n.lastUpdateTime,
-                    ipLocation: n.ipLocation || '',
-                    imageList: (n.imageList || []).map(img => ({
-                        width: img.width,
-                        height: img.height,
-                        urlDefault: img.urlDefault || '',
-                        urlPre: img.urlPre || '',
-                        infoList: (img.infoList || []).map(info => ({
-                            imageScene: info.imageScene,
-                            url: info.url,
-                        })),
-                    })),
-                    video: n.video ? {
-                        url: n.video.media?.stream?.h264?.[0]?.masterUrl || '',
-                        duration: n.video.duration || 0,
-                    } : null,
-                    tagList: (n.tagList || []).map(t => ({ id: t.id, name: t.name })),
-                    user: n.user ? {
-                        userId: n.user.userId || '',
-                        nickname: n.user.nickname || '',
-                        avatar: n.user.avatar || '',
-                    } : null,
-                    interactInfo: n.interactInfo ? {
-                        likedCount: n.interactInfo.likedCount || '0',
-                        collectedCount: n.interactInfo.collectedCount || '0',
-                        commentCount: n.interactInfo.commentCount || '0',
-                        shareCount: n.interactInfo.shareCount || '0',
-                    } : null,
-                };
-            }""", note_id)
-
-            if not data:
+            match = re.search(
+                r'window\.__INITIAL_STATE__\s*=\s*({.+?})\s*</script>',
+                html, re.DOTALL,
+            )
+            if not match:
                 return None
 
-            # Build image URL list
+            raw = match.group(1)
+            # XHS puts literal `undefined` in JSON
+            raw = raw.replace('undefined', 'null')
+            state = json.loads(raw)
+
+            note_map = state.get("note", {}).get("noteDetailMap", {})
+            nd = note_map.get(note_id)
+            if not nd or not nd.get("note"):
+                return None
+
+            n = nd["note"]
+
+            # Images
             images = []
-            for img in data.get("imageList", []):
+            for img in n.get("imageList", []):
                 url = img.get("urlDefault", "")
                 if not url:
                     for info in img.get("infoList", []):
                         if info.get("imageScene") == "WB_DFT":
-                            url = info["url"]
+                            url = info.get("url", "")
                             break
                 if not url:
                     for info in img.get("infoList", []):
@@ -412,21 +304,24 @@ class XiaohongshuDownloader:
                 if url:
                     images.append(url)
 
-            # Video URL
+            # Video
             video_url = None
-            if data.get("video"):
-                video_url = data["video"].get("url")
+            if n.get("video"):
+                video_url = (
+                    n["video"].get("media", {}).get("stream", {})
+                    .get("h264", [{}])[0].get("masterUrl", "")
+                ) or None
 
             # Stats
-            interact = data.get("interactInfo") or {}
-            likes = self._parse_count(str(interact.get("likedCount", "0")))
-            collects = self._parse_count(str(interact.get("collectedCount", "0")))
-            comments_count = self._parse_count(str(interact.get("commentCount", "0")))
-            shares = self._parse_count(str(interact.get("shareCount", "0")))
+            interact = n.get("interactInfo") or {}
+            likes = _parse_count(str(interact.get("likedCount", "0")))
+            collects = _parse_count(str(interact.get("collectedCount", "0")))
+            comments_count = _parse_count(str(interact.get("commentCount", "0")))
+            shares = _parse_count(str(interact.get("shareCount", "0")))
 
             # Time
             publish_time = None
-            ts = data.get("time")
+            ts = n.get("time")
             if ts:
                 try:
                     publish_time = datetime.fromtimestamp(ts / 1000)
@@ -434,20 +329,20 @@ class XiaohongshuDownloader:
                     pass
 
             # Author
-            user = data.get("user") or {}
+            u = n.get("user") or {}
             author = Author(
-                user_id=user.get("userId", ""),
-                nickname=user.get("nickname", ""),
-                avatar=user.get("avatar", ""),
+                user_id=u.get("userId", ""),
+                nickname=u.get("nickname", ""),
+                avatar=u.get("avatar", ""),
             )
 
             # Tags
-            tags = [t["name"] for t in data.get("tagList", []) if t.get("name")]
+            tags = [t["name"] for t in n.get("tagList", []) if t.get("name")]
 
             return Note(
-                note_id=data.get("noteId", note_id),
-                title=data.get("title", ""),
-                content=data.get("desc", ""),
+                note_id=n.get("noteId", note_id),
+                title=n.get("title", ""),
+                content=n.get("desc", ""),
                 images=images,
                 video_url=video_url,
                 tags=tags,
@@ -457,172 +352,47 @@ class XiaohongshuDownloader:
                 comments_count=comments_count,
                 collects=collects,
                 shares=shares,
-                ip_location=data.get("ipLocation", ""),
-                note_type=data.get("type", "normal"),
+                ip_location=n.get("ipLocation", ""),
+                note_type=n.get("type", "normal"),
             )
 
         except Exception as e:
             console.print(f"[dim]SSR extraction error: {e}[/dim]")
             return None
 
-    async def _fetch_comments_api(
-        self,
-        page: Page,
-        note_id: str,
-        xsec_token: str,
-        max_comments: int = 50,
-    ) -> List[Comment]:
-        """Fetch comments via browser API (service worker auto-signs)."""
-        all_comments = []
-        cursor = ""
+    # ---- Image download ----
 
-        while len(all_comments) < max_comments:
-            try:
-                result = await page.evaluate("""async ({noteId, xsecToken, cursor}) => {
-                    const params = new URLSearchParams({
-                        note_id: noteId,
-                        cursor: cursor,
-                        top_comment_id: '',
-                        image_formats: 'jpg,webp,avif',
-                        xsec_token: xsecToken,
-                    });
-                    const url = `https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?${params}`;
-
-                    const resp = await fetch(url, {
-                        method: 'GET',
-                        credentials: 'include',
-                        headers: {
-                            'Accept': 'application/json, text/plain, */*',
-                            'Origin': 'https://www.xiaohongshu.com',
-                            'Referer': 'https://www.xiaohongshu.com/',
-                        },
-                    });
-
-                    const data = await resp.json();
-                    if (!data.data) return { comments: [], hasMore: false, cursor: '' };
-
-                    return {
-                        comments: (data.data.comments || []).map(c => ({
-                            id: c.id,
-                            content: c.content,
-                            likeCount: c.like_count || '0',
-                            createTime: c.create_time,
-                            ipLocation: c.ip_location || '',
-                            user: c.user_info ? {
-                                userId: c.user_info.user_id,
-                                nickname: c.user_info.nickname,
-                                avatar: c.user_info.image,
-                            } : null,
-                            subComments: (c.sub_comments || []).map(sc => ({
-                                id: sc.id,
-                                content: sc.content,
-                                likeCount: sc.like_count || '0',
-                                createTime: sc.create_time,
-                                ipLocation: sc.ip_location || '',
-                                user: sc.user_info ? {
-                                    userId: sc.user_info.user_id,
-                                    nickname: sc.user_info.nickname,
-                                    avatar: sc.user_info.image,
-                                } : null,
-                            })),
-                        })),
-                        hasMore: data.data.has_more || false,
-                        cursor: data.data.cursor || '',
-                    };
-                }""", {"noteId": note_id, "xsecToken": xsec_token, "cursor": cursor})
-
-                if not result or not result.get("comments"):
-                    break
-
-                for c in result["comments"]:
-                    comment = self._build_comment(c)
-                    if comment:
-                        all_comments.append(comment)
-
-                if not result.get("hasMore"):
-                    break
-
-                cursor = result.get("cursor", "")
-                if not cursor:
-                    break
-
-                await asyncio.sleep(0.5)
-
-            except Exception as e:
-                console.print(f"[dim]Comment fetch error: {e}[/dim]")
-                break
-
-        return all_comments[:max_comments]
-
-    def _build_comment(self, data: dict) -> Optional[Comment]:
-        """Build a Comment object from API response data."""
-        if not data or not data.get("content"):
-            return None
-
-        user = data.get("user") or {}
-        author = Author(
-            user_id=user.get("userId", ""),
-            nickname=user.get("nickname", ""),
-            avatar=user.get("avatar", ""),
-        )
-
-        create_time = None
-        ts = data.get("createTime")
-        if ts:
-            try:
-                create_time = datetime.fromtimestamp(ts / 1000)
-            except (ValueError, OSError):
-                pass
-
-        # Sub-comments
-        sub_comments = []
-        for sc in data.get("subComments", []):
-            sub = self._build_comment(sc)
-            if sub:
-                sub_comments.append(sub)
-
-        return Comment(
-            comment_id=data.get("id", ""),
-            content=data.get("content", ""),
-            author=author,
-            likes=self._parse_count(str(data.get("likeCount", "0"))),
-            create_time=create_time,
-            sub_comments=sub_comments,
-            ip_location=data.get("ipLocation", ""),
-        )
-
-    async def _download_images(self, urls: List[str], output_dir: Path):
+    async def _download_images(
+        self, urls: List[str], output_dir: Path, client: httpx.AsyncClient
+    ):
         """Download images to directory."""
-        async with httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-            follow_redirects=True,
-        ) as client:
-            for i, url in enumerate(urls):
-                try:
-                    ext = ".jpg"
-                    if "png" in url.lower():
-                        ext = ".png"
-                    elif "webp" in url.lower():
-                        ext = ".webp"
+        for i, url in enumerate(urls):
+            try:
+                ext = ".jpg"
+                if "png" in url.lower():
+                    ext = ".png"
+                elif "webp" in url.lower():
+                    ext = ".webp"
 
-                    response = await client.get(url, timeout=30.0)
-                    if response.status_code == 200:
-                        path = output_dir / f"image_{i+1:02d}{ext}"
-                        path.write_bytes(response.content)
-                except Exception:
-                    continue
+                resp = await client.get(url, timeout=30.0)
+                if resp.status_code == 200:
+                    path = output_dir / f"image_{i+1:02d}{ext}"
+                    path.write_bytes(resp.content)
+            except Exception:
+                continue
 
-    @staticmethod
-    def _parse_count(text: str) -> int:
-        """Parse count like '1.2万' or '1234'."""
-        text = text.strip()
-        try:
-            if "万" in text:
-                return int(float(text.replace("万", "")) * 10000)
-            elif "亿" in text:
-                return int(float(text.replace("亿", "")) * 100000000)
-            else:
-                clean = "".join(c for c in text if c.isdigit() or c == ".")
-                return int(float(clean)) if clean else 0
-        except Exception:
-            return 0
+
+# ---- Helpers ----
+
+def _parse_count(text: str) -> int:
+    text = text.strip()
+    try:
+        if "万" in text:
+            return int(float(text.replace("万", "")) * 10000)
+        elif "亿" in text:
+            return int(float(text.replace("亿", "")) * 100000000)
+        else:
+            clean = "".join(c for c in text if c.isdigit() or c == ".")
+            return int(float(clean)) if clean else 0
+    except Exception:
+        return 0
