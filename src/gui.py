@@ -166,7 +166,6 @@ class CookieDialog(QDialog):
         instructions.setWordWrap(True)
         instructions.setTextFormat(Qt.RichText)
         layout.addWidget(instructions)
-        layout.addWidget(step4)
 
         self.text_edit = QTextEdit()
         self.text_edit.setPlaceholderText("在此粘贴 Cookie（支持 Netscape txt、JSON、原始字符串格式）...")
