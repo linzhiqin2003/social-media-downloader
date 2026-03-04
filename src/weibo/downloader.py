@@ -131,20 +131,13 @@ class WeiboDownloader:
         console.print()
         console.print("[bold cyan]微博 Cookie 导入指南[/bold cyan]")
         console.print()
-        console.print("1. 在浏览器中打开 [link=https://weibo.com]weibo.com[/link] 并登录")
-        console.print("2. 按 F12 打开开发者工具 → 控制台 (Console)")
-        console.print("3. 粘贴以下代码并回车：")
-        console.print()
-        console.print(
-            "[dim]copy(document.cookie.split('; ')"
-            ".map(c => { const [n,...v] = c.split('='); "
-            "return {name:n, value:v.join('=')} }))[/dim]"
-        )
-        console.print()
-        console.print("4. 已复制到剪贴板，粘贴到下面：")
+        console.print("1. 安装浏览器 Cookie 导出插件（推荐 Cookie-Editor 或 Get cookies.txt LOCALLY）")
+        console.print("2. 在浏览器中打开 [link=https://weibo.com]weibo.com[/link] 并登录")
+        console.print("3. 点击插件图标，导出全部 Cookie（Netscape/txt 或 JSON 格式均可）")
+        console.print("4. 粘贴到下面：")
         console.print()
 
-        raw = input("粘贴 Cookie JSON > ").strip()
+        raw = input("粘贴 Cookie > ").strip()
         if not raw:
             console.print("[red]未输入内容[/red]")
             return False

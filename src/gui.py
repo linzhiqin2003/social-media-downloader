@@ -157,35 +157,19 @@ class CookieDialog(QDialog):
 
         instructions = QLabel(
             f"<b>{platform_name} Cookie 导入</b><br><br>"
-            "1. 在浏览器中打开对应网站并登录<br>"
-            "2. 按 F12 → 控制台 (Console)<br>"
-            "3. 粘贴以下代码并回车："
+            "1. 安装浏览器 Cookie 导出插件（推荐 "
+            "<i>Cookie-Editor</i> 或 <i>Get cookies.txt LOCALLY</i>）<br>"
+            "2. 在浏览器中打开对应网站并登录<br>"
+            "3. 点击插件图标，导出全部 Cookie（Netscape/txt 或 JSON 格式均可）<br>"
+            "4. 将导出内容粘贴到下方："
         )
         instructions.setWordWrap(True)
         instructions.setTextFormat(Qt.RichText)
         layout.addWidget(instructions)
-
-        js_code = (
-            "copy(document.cookie.split('; ')"
-            ".map(c => { const [n,...v] = c.split('='); "
-            "return {name:n, value:v.join('=')} }))"
-        )
-        code_row = QHBoxLayout()
-        code_field = QLineEdit(js_code)
-        code_field.setReadOnly(True)
-        code_field.setStyleSheet("background: #f0f0f0; font-family: monospace; padding: 4px;")
-        code_row.addWidget(code_field, 1)
-        copy_btn = QPushButton("复制")
-        copy_btn.setFixedWidth(60)
-        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(js_code))
-        code_row.addWidget(copy_btn)
-        layout.addLayout(code_row)
-
-        step4 = QLabel("4. 将剪贴板内容粘贴到下方：")
         layout.addWidget(step4)
 
         self.text_edit = QTextEdit()
-        self.text_edit.setPlaceholderText("在此粘贴 Cookie JSON 或原始字符串...")
+        self.text_edit.setPlaceholderText("在此粘贴 Cookie（支持 Netscape txt、JSON、原始字符串格式）...")
         layout.addWidget(self.text_edit)
 
         btn_layout = QHBoxLayout()
